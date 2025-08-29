@@ -1,28 +1,23 @@
 from flask import Flask, request, jsonify, Response
 import json
-import asyncio
-from jinja2 import Template
 import os
 import base64
 import io
 import logging
 import traceback
 from datetime import datetime
-from playwright.async_api import async_playwright
-import nest_asyncio
+from jinja2 import Template
 import qrcode
 from PIL import Image
+import weasyprint
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Enable nested event loops (needed for Flask + asyncio)
-nest_asyncio.apply()
-
 app = Flask(__name__)
 
-# Updated HTML template for Invoice
+# Updated HTML template for Invoice (same as before)
 INVOICE_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -304,6 +299,11 @@ INVOICE_TEMPLATE = """
                 padding: 5mm;
             }
         }
+
+        @page {
+            size: A4;
+            margin: 0.3in;
+        }
     </style>
 </head>
 <body>
@@ -490,7 +490,7 @@ INVOICE_TEMPLATE = """
                         <span>{{ company_pan }}</span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">FSSAI Lic No:</span>
+                        <span class="label">FSSAI Lic No:</span>
                         <span>{{ company_fssai }}</span>
                     </div>
                     <div class="info-row">
@@ -739,7 +739,6 @@ class InvoiceGenerator:
             return img_base64
         except Exception as e:
             logger.error(f"Error generating QR code: {str(e)}")
-            logger.error(traceback.format_exc())
             return None
     
     def generate_html(self, invoice_data):
@@ -757,84 +756,27 @@ class InvoiceGenerator:
             return html_content
         except Exception as e:
             logger.error(f"Error generating HTML: {str(e)}")
-            logger.error(traceback.format_exc())
             raise Exception(f"Error generating HTML: {str(e)}")
     
-    async def generate_pdf_async(self, invoice_data):
-        """Generate PDF invoice using Playwright with better error handling"""
-        browser = None
+    def generate_pdf(self, invoice_data):
+        """Generate PDF using WeasyPrint instead of Playwright"""
         try:
-            logger.info("Starting PDF generation process...")
+            logger.info("Starting PDF generation with WeasyPrint...")
+            
+            # Generate HTML content
             html_content = self.generate_html(invoice_data)
             logger.info("HTML content generated successfully")
             
-            # Check if Playwright browsers are installed
-            logger.info("Launching Playwright browser...")
-            async with async_playwright() as p:
-                # Try to launch with specific browser path if available
-                browser_args = []
-                if os.getenv('PLAYWRIGHT_BROWSERS_PATH'):
-                    logger.info(f"Using browser path: {os.getenv('PLAYWRIGHT_BROWSERS_PATH')}")
-                
-                try:
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-                    )
-                    logger.info("Browser launched successfully")
-                except Exception as browser_error:
-                    logger.error(f"Browser launch failed: {str(browser_error)}")
-                    raise Exception(f"Failed to launch browser: {str(browser_error)}")
-                
-                page = await browser.new_page()
-                logger.info("New page created")
-                
-                # Set the HTML content with a timeout
-                await page.set_content(html_content, wait_until="networkidle", timeout=30000)
-                logger.info("HTML content set on page")
-                
-                # Generate PDF with proper options
-                pdf_bytes = await page.pdf(
-                    format='A4',
-                    margin={
-                        'top': '0.3in',
-                        'right': '0.3in',
-                        'bottom': '0.3in',
-                        'left': '0.3in'
-                    },
-                    print_background=True
-                )
-                logger.info("PDF generated successfully")
-                
-                await browser.close()
-                logger.info("Browser closed")
-                return pdf_bytes
-                
+            # Convert HTML to PDF using WeasyPrint
+            pdf_bytes = weasyprint.HTML(string=html_content).write_pdf()
+            logger.info(f"PDF generated successfully with WeasyPrint, size: {len(pdf_bytes)} bytes")
+            
+            return pdf_bytes
+            
         except Exception as e:
-            logger.error(f"Error in PDF generation: {str(e)}")
+            logger.error(f"Error generating PDF with WeasyPrint: {str(e)}")
             logger.error(traceback.format_exc())
-            if browser:
-                try:
-                    await browser.close()
-                except:
-                    pass
             raise Exception(f"PDF generation failed: {str(e)}")
-    
-    def generate_pdf(self, invoice_data):
-        """Synchronous wrapper for PDF generation with better error handling"""
-        try:
-            logger.info("Starting synchronous PDF generation...")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(self.generate_pdf_async(invoice_data))
-                logger.info("PDF generation completed successfully")
-                return result
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(f"Error in synchronous PDF wrapper: {str(e)}")
-            raise
 
     def validate_invoice_data(self, data):
         """Validate required fields in invoice data"""
@@ -884,7 +826,7 @@ invoice_generator = InvoiceGenerator()
 
 @app.route('/generate-invoice', methods=['POST'])
 def generate_invoice():
-    """API endpoint to generate regular invoice with improved error handling"""
+    """API endpoint to generate regular invoice"""
     try:
         logger.info(f"Received invoice generation request from {request.remote_addr}")
         
@@ -911,8 +853,8 @@ def generate_invoice():
         
         if output_format == 'pdf':
             try:
-                # Generate PDF
-                logger.info("Starting PDF generation...")
+                # Generate PDF using WeasyPrint
+                logger.info("Starting PDF generation with WeasyPrint...")
                 pdf_bytes = invoice_generator.generate_pdf(invoice_data)
                 logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
                 
@@ -961,7 +903,7 @@ def generate_invoice():
 
 @app.route('/generate-ewaybill', methods=['POST'])
 def generate_ewaybill():
-    """API endpoint to generate E-Way Bill with transport details and improved error handling"""
+    """API endpoint to generate E-Way Bill with transport details"""
     try:
         logger.info(f"Received E-Way Bill generation request from {request.remote_addr}")
         
@@ -994,7 +936,7 @@ def generate_ewaybill():
         if output_format == 'pdf':
             try:
                 # Generate PDF
-                logger.info("Starting E-Way Bill PDF generation...")
+                logger.info("Starting E-Way Bill PDF generation with WeasyPrint...")
                 pdf_bytes = invoice_generator.generate_pdf(ewaybill_data)
                 logger.info(f"E-Way Bill PDF generated successfully, size: {len(pdf_bytes)} bytes")
                 
@@ -1048,22 +990,13 @@ def health_check():
         import sys
         import platform
         
-        # Check Playwright installation
-        playwright_status = "unknown"
-        try:
-            from playwright._impl._driver import compute_driver_executable
-            playwright_status = "installed"
-        except Exception:
-            playwright_status = "not installed"
-        
         health_info = {
             'status': 'healthy',
             'timestamp': datetime.now().isoformat(),
             'python_version': sys.version,
             'platform': platform.platform(),
-            'playwright_status': playwright_status,
+            'pdf_engine': 'WeasyPrint',
             'environment_vars': {
-                'PLAYWRIGHT_BROWSERS_PATH': os.getenv('PLAYWRIGHT_BROWSERS_PATH', 'not set'),
                 'PORT': os.getenv('PORT', 'not set')
             }
         }
@@ -1078,11 +1011,11 @@ def health_check():
             'timestamp': datetime.now().isoformat()
         }), 500
 
-@app.route('/debug-browser', methods=['GET'])
-def debug_browser():
-    """Debug endpoint to test browser functionality"""
+@app.route('/debug-pdf', methods=['GET'])
+def debug_pdf():
+    """Debug endpoint to test PDF generation with WeasyPrint"""
     try:
-        logger.info("Browser debug test initiated")
+        logger.info("PDF debug test initiated with WeasyPrint")
         
         # Test data
         test_data = {
@@ -1106,19 +1039,20 @@ def debug_browser():
             html_content = invoice_generator.generate_html(test_data)
             logger.info("HTML generation test successful")
             
-            # Try to generate PDF
+            # Try to generate PDF with WeasyPrint
             pdf_bytes = invoice_generator.generate_pdf(test_data)
-            logger.info(f"PDF generation test successful, size: {len(pdf_bytes)} bytes")
+            logger.info(f"PDF generation test successful with WeasyPrint, size: {len(pdf_bytes)} bytes")
             
             return jsonify({
                 'status': 'success',
-                'message': 'Both HTML and PDF generation working',
+                'message': 'Both HTML and PDF generation working with WeasyPrint',
                 'html_length': len(html_content),
-                'pdf_size': len(pdf_bytes)
+                'pdf_size': len(pdf_bytes),
+                'pdf_engine': 'WeasyPrint'
             })
             
         except Exception as test_error:
-            logger.error(f"Browser debug test failed: {str(test_error)}")
+            logger.error(f"PDF debug test failed: {str(test_error)}")
             return jsonify({
                 'status': 'failed',
                 'error': str(test_error),
@@ -1148,7 +1082,6 @@ def get_template_schema():
         "qr_code_data": "string - QR code data content",
         "government_portal": "string - Government portal URL",
         "einvoice_compliance_note": "string - Compliance note for E-Invoice",
-        "signed_invoice_available": "boolean - Whether signed invoice is available",
         
         # E-Way Bill specific fields
         "is_ewaybill": "boolean - Whether this is an E-Way Bill",
@@ -1168,15 +1101,13 @@ def get_template_schema():
         "transport_mode": "string - Mode of transport (Road/Rail/Air/Ship)",
         "from_place": "string - Origin place",
         "from_pincode": "string - Origin pincode",
-        "from_state_code": "string - Origin state code",
         "to_place": "string - Destination place",
         "to_pincode": "string - Destination pincode",
-        "to_state_code": "string - Destination state code",
         "has_extensions": "boolean - Whether E-Way Bill has extensions",
         "extension_count": "number - Number of extensions applied",
         
         # Company and customer details
-        "company_name": "string - Company name",
+        "company_name": "string - Company name (required)",
         "company_address": "string - Company address",
         "company_city": "string - Company city",
         "company_gstin": "string - Company GSTIN",
@@ -1188,7 +1119,7 @@ def get_template_schema():
         "beat_name": "string - Beat name",
         "sm_contact": "string - Sales manager contact",
         "sm_mobile": "string - Sales manager mobile",
-        "customer_name": "string - Customer name",
+        "customer_name": "string - Customer name (required)",
         "customer_address": "string - Customer address",
         "retailer_code": "string - Retailer code",
         "po_so_ref": "string - PO/SO reference",
@@ -1202,7 +1133,7 @@ def get_template_schema():
         "customer_state_code": "string - Customer state code",
         "vehicle": "string - Vehicle information",
         
-        # Product details
+        # Product details (required)
         "products": [
             {
                 "serial_no": "number - Serial number",
@@ -1241,18 +1172,9 @@ def get_template_schema():
         "total_cgst_amt": "string - Total CGST amount",
         "total_sgst_amt": "string - Total SGST amount",
         
-        # Tax summary
-        "tax_slabs": [
-            {
-                "taxable_amount": "string - Taxable amount for this slab",
-                "cgst_rate": "string - CGST rate",
-                "cgst_amount": "string - CGST amount",
-                "sgst_rate": "string - SGST rate",
-                "sgst_amount": "string - SGST amount"
-            }
-        ],
-        
         # Financial summary
+        "net_receivable": "string - Net receivable amount (required)",
+        "amount_in_words": "string - Amount in words",
         "pre_tax_scheme_amt": "string - Pre-tax scheme amount",
         "net_amount": "string - Net amount",
         "total_cgst": "string - Total CGST",
@@ -1261,8 +1183,6 @@ def get_template_schema():
         "tcs_tax_amt": "string - TCS tax amount",
         "credit_adj": "string - Credit adjustment",
         "round_off": "string - Round off amount",
-        "net_receivable": "string - Net receivable amount",
-        "amount_in_words": "string - Amount in words",
         
         # Footer details
         "reverse_charge_basis": "string - Reverse charge basis (Yes/No)",
@@ -1302,23 +1222,16 @@ def get_ewaybill_schema():
             "transport_mode": "string - Road/Rail/Air/Ship",
             "from_place": "string - Origin city/place",
             "from_pincode": "string - Origin pincode",
-            "from_state_code": "string - Origin state code",
             "to_place": "string - Destination city/place", 
             "to_pincode": "string - Destination pincode",
-            "to_state_code": "string - Destination state code",
             "has_extensions": "boolean - Whether validity was extended",
             "extension_count": "number - Number of extensions applied"
         },
-        "automatic_fields": {
-            "is_ewaybill": "boolean - Automatically set to true",
-            "invoice_type": "string - Automatically set to 'TAX INVOICE WITH E-WAY BILL'",
-            "document_type": "string - Automatically set to 'ORIGINAL FOR CONSIGNEE'",
-            "ewaybill_compliance_note": "string - Auto-generated compliance text"
-        }
+        "note": "WeasyPrint PDF engine provides better compatibility than Playwright"
     }
     
     return jsonify(schema)
 
 if __name__ == '__main__':
-    logger.info("Starting Flask application...")
+    logger.info("Starting Flask application with WeasyPrint PDF engine...")
     app.run(debug=True, host='0.0.0.0', port=8088)
