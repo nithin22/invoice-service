@@ -5,11 +5,17 @@ from jinja2 import Template
 import os
 import base64
 import io
+import logging
+import traceback
 from datetime import datetime
 from playwright.async_api import async_playwright
 import nest_asyncio
 import qrcode
 from PIL import Image
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Enable nested event loops (needed for Flask + asyncio)
 nest_asyncio.apply()
@@ -732,7 +738,8 @@ class InvoiceGenerator:
             
             return img_base64
         except Exception as e:
-            print(f"Error generating QR code: {str(e)}")
+            logger.error(f"Error generating QR code: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
     
     def generate_html(self, invoice_data):
@@ -749,19 +756,42 @@ class InvoiceGenerator:
             html_content = self.template.render(**invoice_data)
             return html_content
         except Exception as e:
+            logger.error(f"Error generating HTML: {str(e)}")
+            logger.error(traceback.format_exc())
             raise Exception(f"Error generating HTML: {str(e)}")
     
     async def generate_pdf_async(self, invoice_data):
-        """Generate PDF invoice using Playwright"""
+        """Generate PDF invoice using Playwright with better error handling"""
+        browser = None
         try:
+            logger.info("Starting PDF generation process...")
             html_content = self.generate_html(invoice_data)
+            logger.info("HTML content generated successfully")
             
+            # Check if Playwright browsers are installed
+            logger.info("Launching Playwright browser...")
             async with async_playwright() as p:
-                browser = await p.chromium.launch()
-                page = await browser.new_page()
+                # Try to launch with specific browser path if available
+                browser_args = []
+                if os.getenv('PLAYWRIGHT_BROWSERS_PATH'):
+                    logger.info(f"Using browser path: {os.getenv('PLAYWRIGHT_BROWSERS_PATH')}")
                 
-                # Set the HTML content
-                await page.set_content(html_content, wait_until="networkidle")
+                try:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                    )
+                    logger.info("Browser launched successfully")
+                except Exception as browser_error:
+                    logger.error(f"Browser launch failed: {str(browser_error)}")
+                    raise Exception(f"Failed to launch browser: {str(browser_error)}")
+                
+                page = await browser.new_page()
+                logger.info("New page created")
+                
+                # Set the HTML content with a timeout
+                await page.set_content(html_content, wait_until="networkidle", timeout=30000)
+                logger.info("HTML content set on page")
                 
                 # Generate PDF with proper options
                 pdf_bytes = await page.pdf(
@@ -774,21 +804,37 @@ class InvoiceGenerator:
                     },
                     print_background=True
                 )
+                logger.info("PDF generated successfully")
                 
                 await browser.close()
+                logger.info("Browser closed")
                 return pdf_bytes
                 
         except Exception as e:
-            raise Exception(f"Error generating PDF: {str(e)}")
+            logger.error(f"Error in PDF generation: {str(e)}")
+            logger.error(traceback.format_exc())
+            if browser:
+                try:
+                    await browser.close()
+                except:
+                    pass
+            raise Exception(f"PDF generation failed: {str(e)}")
     
     def generate_pdf(self, invoice_data):
-        """Synchronous wrapper for PDF generation"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        """Synchronous wrapper for PDF generation with better error handling"""
         try:
-            return loop.run_until_complete(self.generate_pdf_async(invoice_data))
-        finally:
-            loop.close()
+            logger.info("Starting synchronous PDF generation...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(self.generate_pdf_async(invoice_data))
+                logger.info("PDF generation completed successfully")
+                return result
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Error in synchronous PDF wrapper: {str(e)}")
+            raise
 
     def validate_invoice_data(self, data):
         """Validate required fields in invoice data"""
@@ -838,47 +884,92 @@ invoice_generator = InvoiceGenerator()
 
 @app.route('/generate-invoice', methods=['POST'])
 def generate_invoice():
-    """API endpoint to generate regular invoice"""
+    """API endpoint to generate regular invoice with improved error handling"""
     try:
+        logger.info(f"Received invoice generation request from {request.remote_addr}")
+        
         # Get JSON data from request
         invoice_data = request.get_json()
         
         if not invoice_data:
+            logger.error("No JSON data provided in request")
             return jsonify({'error': 'No JSON data provided'}), 400
         
+        logger.info(f"Processing invoice: {invoice_data.get('invoice_number', 'Unknown')}")
+        
         # Validate the data
-        invoice_generator.validate_invoice_data(invoice_data)
+        try:
+            invoice_generator.validate_invoice_data(invoice_data)
+            logger.info("Invoice data validation successful")
+        except ValueError as ve:
+            logger.error(f"Validation error: {str(ve)}")
+            return jsonify({'error': f'Validation error: {str(ve)}'}), 400
         
         # Get output format (html or pdf)
         output_format = request.args.get('format', 'html').lower()
+        logger.info(f"Output format requested: {output_format}")
         
         if output_format == 'pdf':
-            # Generate PDF
-            pdf_bytes = invoice_generator.generate_pdf(invoice_data)
-            
-            # Create response
-            response = Response(pdf_bytes, mimetype='application/pdf')
-            response.headers['Content-Disposition'] = f'attachment; filename=invoice_{invoice_data["invoice_number"]}.pdf'
-            return response
+            try:
+                # Generate PDF
+                logger.info("Starting PDF generation...")
+                pdf_bytes = invoice_generator.generate_pdf(invoice_data)
+                logger.info(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
+                
+                # Create response
+                response = Response(pdf_bytes, mimetype='application/pdf')
+                response.headers['Content-Disposition'] = f'attachment; filename=invoice_{invoice_data["invoice_number"]}.pdf'
+                logger.info("PDF response prepared successfully")
+                return response
+                
+            except Exception as pdf_error:
+                logger.error(f"PDF generation failed: {str(pdf_error)}")
+                logger.error(traceback.format_exc())
+                
+                # Fallback to HTML if PDF fails
+                logger.info("Falling back to HTML generation...")
+                try:
+                    html_content = invoice_generator.generate_html(invoice_data)
+                    return jsonify({
+                        'error': 'PDF generation failed, HTML fallback provided',
+                        'pdf_error': str(pdf_error),
+                        'html_content': html_content
+                    }), 500
+                except Exception as html_error:
+                    logger.error(f"HTML fallback also failed: {str(html_error)}")
+                    return jsonify({
+                        'error': 'Both PDF and HTML generation failed',
+                        'pdf_error': str(pdf_error),
+                        'html_error': str(html_error)
+                    }), 500
         
         else:
-            # Generate HTML
-            html_content = invoice_generator.generate_html(invoice_data)
-            return html_content, 200, {'Content-Type': 'text/html'}
+            try:
+                # Generate HTML
+                logger.info("Generating HTML...")
+                html_content = invoice_generator.generate_html(invoice_data)
+                logger.info("HTML generated successfully")
+                return html_content, 200, {'Content-Type': 'text/html'}
+            except Exception as html_error:
+                logger.error(f"HTML generation failed: {str(html_error)}")
+                return jsonify({'error': f'HTML generation failed: {str(html_error)}'}), 500
             
-    except ValueError as e:
-        return jsonify({'error': f'Validation error: {str(e)}'}), 400
     except Exception as e:
+        logger.error(f"Unexpected error in generate_invoice: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/generate-ewaybill', methods=['POST'])
 def generate_ewaybill():
-    """API endpoint to generate E-Way Bill with transport details"""
+    """API endpoint to generate E-Way Bill with transport details and improved error handling"""
     try:
+        logger.info(f"Received E-Way Bill generation request from {request.remote_addr}")
+        
         # Get JSON data from request
         ewaybill_data = request.get_json()
         
         if not ewaybill_data:
+            logger.error("No JSON data provided in E-Way Bill request")
             return jsonify({'error': 'No JSON data provided'}), 400
         
         # Set E-Way Bill specific flags
@@ -886,35 +977,157 @@ def generate_ewaybill():
         ewaybill_data['invoice_type'] = ewaybill_data.get('invoice_type', 'TAX INVOICE WITH E-WAY BILL')
         ewaybill_data['document_type'] = ewaybill_data.get('document_type', 'ORIGINAL FOR CONSIGNEE')
         
+        logger.info(f"Processing E-Way Bill: {ewaybill_data.get('ewb_number', 'Unknown')}")
+        
         # Validate the data
-        invoice_generator.validate_ewaybill_data(ewaybill_data)
+        try:
+            invoice_generator.validate_ewaybill_data(ewaybill_data)
+            logger.info("E-Way Bill data validation successful")
+        except ValueError as ve:
+            logger.error(f"E-Way Bill validation error: {str(ve)}")
+            return jsonify({'error': f'Validation error: {str(ve)}'}), 400
         
         # Get output format (html or pdf)
         output_format = request.args.get('format', 'html').lower()
+        logger.info(f"E-Way Bill output format requested: {output_format}")
         
         if output_format == 'pdf':
-            # Generate PDF
-            pdf_bytes = invoice_generator.generate_pdf(ewaybill_data)
-            
-            # Create response
-            response = Response(pdf_bytes, mimetype='application/pdf')
-            response.headers['Content-Disposition'] = f'attachment; filename=ewaybill_{ewaybill_data["ewb_number"]}.pdf'
-            return response
+            try:
+                # Generate PDF
+                logger.info("Starting E-Way Bill PDF generation...")
+                pdf_bytes = invoice_generator.generate_pdf(ewaybill_data)
+                logger.info(f"E-Way Bill PDF generated successfully, size: {len(pdf_bytes)} bytes")
+                
+                # Create response
+                response = Response(pdf_bytes, mimetype='application/pdf')
+                response.headers['Content-Disposition'] = f'attachment; filename=ewaybill_{ewaybill_data["ewb_number"]}.pdf'
+                logger.info("E-Way Bill PDF response prepared successfully")
+                return response
+                
+            except Exception as pdf_error:
+                logger.error(f"E-Way Bill PDF generation failed: {str(pdf_error)}")
+                logger.error(traceback.format_exc())
+                
+                # Fallback to HTML if PDF fails
+                logger.info("Falling back to HTML generation for E-Way Bill...")
+                try:
+                    html_content = invoice_generator.generate_html(ewaybill_data)
+                    return jsonify({
+                        'error': 'E-Way Bill PDF generation failed, HTML fallback provided',
+                        'pdf_error': str(pdf_error),
+                        'html_content': html_content
+                    }), 500
+                except Exception as html_error:
+                    logger.error(f"E-Way Bill HTML fallback also failed: {str(html_error)}")
+                    return jsonify({
+                        'error': 'Both E-Way Bill PDF and HTML generation failed',
+                        'pdf_error': str(pdf_error),
+                        'html_error': str(html_error)
+                    }), 500
         
         else:
-            # Generate HTML
-            html_content = invoice_generator.generate_html(ewaybill_data)
-            return html_content, 200, {'Content-Type': 'text/html'}
+            try:
+                # Generate HTML
+                logger.info("Generating E-Way Bill HTML...")
+                html_content = invoice_generator.generate_html(ewaybill_data)
+                logger.info("E-Way Bill HTML generated successfully")
+                return html_content, 200, {'Content-Type': 'text/html'}
+            except Exception as html_error:
+                logger.error(f"E-Way Bill HTML generation failed: {str(html_error)}")
+                return jsonify({'error': f'HTML generation failed: {str(html_error)}'}), 500
             
-    except ValueError as e:
-        return jsonify({'error': f'Validation error: {str(e)}'}), 400
     except Exception as e:
+        logger.error(f"Unexpected error in generate_ewaybill: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+    """Health check endpoint with system information"""
+    try:
+        import sys
+        import platform
+        
+        # Check Playwright installation
+        playwright_status = "unknown"
+        try:
+            from playwright._impl._driver import compute_driver_executable
+            playwright_status = "installed"
+        except Exception:
+            playwright_status = "not installed"
+        
+        health_info = {
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'python_version': sys.version,
+            'platform': platform.platform(),
+            'playwright_status': playwright_status,
+            'environment_vars': {
+                'PLAYWRIGHT_BROWSERS_PATH': os.getenv('PLAYWRIGHT_BROWSERS_PATH', 'not set'),
+                'PORT': os.getenv('PORT', 'not set')
+            }
+        }
+        
+        logger.info("Health check requested")
+        return jsonify(health_info)
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
+@app.route('/debug-browser', methods=['GET'])
+def debug_browser():
+    """Debug endpoint to test browser functionality"""
+    try:
+        logger.info("Browser debug test initiated")
+        
+        # Test data
+        test_data = {
+            'invoice_number': 'TEST001',
+            'invoice_date': '01/01/2025',
+            'company_name': 'Test Company',
+            'customer_name': 'Test Customer',
+            'products': [{
+                'serial_no': 1,
+                'product_name': 'Test Product',
+                'hsn_code': '12345',
+                'mrp': '100',
+                'qty': '1',
+                'net_value': '100'
+            }],
+            'net_receivable': '100'
+        }
+        
+        try:
+            # Try to generate HTML first
+            html_content = invoice_generator.generate_html(test_data)
+            logger.info("HTML generation test successful")
+            
+            # Try to generate PDF
+            pdf_bytes = invoice_generator.generate_pdf(test_data)
+            logger.info(f"PDF generation test successful, size: {len(pdf_bytes)} bytes")
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Both HTML and PDF generation working',
+                'html_length': len(html_content),
+                'pdf_size': len(pdf_bytes)
+            })
+            
+        except Exception as test_error:
+            logger.error(f"Browser debug test failed: {str(test_error)}")
+            return jsonify({
+                'status': 'failed',
+                'error': str(test_error),
+                'traceback': traceback.format_exc()
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/template-schema', methods=['GET'])
 def get_template_schema():
@@ -1107,4 +1320,5 @@ def get_ewaybill_schema():
     return jsonify(schema)
 
 if __name__ == '__main__':
+    logger.info("Starting Flask application...")
     app.run(debug=True, host='0.0.0.0', port=8088)
