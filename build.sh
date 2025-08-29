@@ -2,14 +2,14 @@
 # Fail on error
 set -o errexit
 
-# Install Python dependencies
+echo "Installing Python dependencies..."
 pip install -r requirements.txt
 
-# Install Playwright browsers with dependencies
-python -m playwright install --with-deps chromium
+echo "Installing Playwright browsers..."
+# Install browsers without specifying a custom path initially
+python -m playwright install chromium
 
-# Create cache directory for Playwright
-mkdir -p /opt/render/.cache/ms-playwright
+echo "Verifying browser installation..."
+python -m playwright install-deps chromium
 
-# Set environment variable for Playwright
-export PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright
+echo "Build completed successfully"
