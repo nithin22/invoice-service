@@ -2,8 +2,9 @@ services:
   - type: web
     name: invoice-service
     env: python
+    buildCommand: ./build.sh
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     plan: free
-    buildCommand: |
-      pip install -r requirements.txt
-      playwright install chromium
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
