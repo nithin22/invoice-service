@@ -1,0 +1,7 @@
+Flask
+jinja2
+qrcode
+pillow
+playwright
+nest_asyncio
+gunicorn

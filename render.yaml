@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: invoice-service
+    env: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install chromium
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
