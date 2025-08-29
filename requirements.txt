@@ -1,2 +1,5 @@
 flask
 playwright
+gunicorn
+qrcode[pil]
+nest-asyncio
